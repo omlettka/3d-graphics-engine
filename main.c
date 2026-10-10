@@ -8,6 +8,16 @@
 const int screenWidth = 1024;
 const int screenHeight = 1024;
 
+Vector3 normalize(Vector3 vector) {
+    float length = sqrtf(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z);
+    if (length != 0.0f) {
+        vector.x /= length;
+        vector.y /= length;
+        vector.z /= length;
+    }
+    return vector;
+}
+
 typedef struct Matrix4x4 {
     float m[4][4];
 } Matrix4x4;
@@ -22,18 +32,14 @@ Matrix4x4 createMatrix4x4 (float m[4][4]) {
     return matrix;
 }
 
-Vector3 multiply (Vector3 vector, Matrix4x4 matrix)
+Vector3 multiply (Vector3 vector, Matrix4x4 matrix, float *w)
 {
     Vector3 result;
     result.x = vector.x * matrix.m[0][0] + vector.y * matrix.m[1][0] + vector.z * matrix.m[2][0] + matrix.m[3][0];
     result.y = vector.x * matrix.m[0][1] + vector.y * matrix.m[1][1] + vector.z * matrix.m[2][1] + matrix.m[3][1];
     result.z = vector.x * matrix.m[0][2] + vector.y * matrix.m[1][2] + vector.z * matrix.m[2][2] + matrix.m[3][2];
-    float w = vector.x * matrix.m[0][3] + vector.y * matrix.m[1][3] + vector.z * matrix.m[2][3] + matrix.m[3][3];
-    if (w != 0.0f) {
-        result.x /= w;
-        result.y /= w;
-        result.z /= w;
-    }
+    *w = vector.x * matrix.m[0][3] + vector.y * matrix.m[1][3] + vector.z * matrix.m[2][3] + matrix.m[3][3];
+
     return result;
 }
 
@@ -51,12 +57,7 @@ typedef struct LightPlane {
 LightPlane createLightPlane(Vector3 dir) {
     LightPlane lightPlane;
     lightPlane.dir = dir;
-    float length = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-    if (length != 0.0f) {
-        lightPlane.dir.x /= length;
-        lightPlane.dir.y /= length;
-        lightPlane.dir.z /= length;
-    }
+    lightPlane.dir = normalize(lightPlane.dir);
     return lightPlane;
 }
 
@@ -66,8 +67,42 @@ typedef struct Cam {
     float aspectRatio;
     float maxViewDistance;
     int fov;
-    Vector2 dir;
+    Vector3 dir;
 } Cam;
+
+void moveCamera(Cam *camera, Vector3 movement) {
+    //forward
+    camera->pos.x += movement.x*camera->dir.x;
+    camera->pos.z += movement.x*camera->dir.z;
+    //up
+    camera->pos.y += movement.y;
+    //right
+    camera->pos.x += camera->dir.z*movement.z;
+    camera->pos.z += -camera->dir.x*movement.z;
+}
+
+void rotateCamera(Cam *camera, Vector2 rotation) {
+    float angleH = rotation.x * 3.14159265358979323846 / 180.0;
+    float angleV = rotation.y * 3.14159265358979323846 / 180.0;
+
+    //vertical ratation
+    camera->dir.x = camera->dir.x * cos(angleV) + camera->dir.z * sin(angleV);
+    camera->dir.z = -camera->dir.x * sin(angleV) + camera->dir.z * cos(angleV);
+
+    //horizontal rotation
+    Vector3 up = {0, 1, 0};
+    Vector3 right;
+    right.x = camera->dir.z;
+    right.y = 0;
+    right.z = -camera->dir.x;
+    right = normalize(right);
+    
+    // dir_rot = dir * cos(angle) + CrossProduct(right, dir) * sin(angle)
+    camera->dir.x = camera->dir.x * cos(angleH) + (right.y * camera->dir.z - right.z * camera->dir.y) * sin(angleH);
+    camera->dir.y = camera->dir.y * cos(angleH) + (right.z * camera->dir.x - right.x * camera->dir.z) * sin(angleH);
+    camera->dir.z = camera->dir.z * cos(angleH) + (right.x * camera->dir.y - right.y * camera->dir.x) * sin(angleH);
+    camera->dir = normalize(camera->dir);
+}
 /*
 Vector2 projectFromCamera(Vector3 point, int fov, int vDist) {
     int z = vDist * point.z;
@@ -85,8 +120,21 @@ Vector2 projectFromCamera(Vector3 point, int fov, int vDist) {
 }
 */
 
-Vector3 projectPoint(Vector3 point3D, Matrix4x4 translationMatrix) {
-    Vector3 transformedPoint = multiply(point3D, translationMatrix);
+Vector3 projectPoint(Vector3 point3D, Matrix4x4 translationMatrix, Cam camera, Matrix4x4 viewMatrix) {
+    float w;
+    //point3D.x -= camera.pos.x;
+    //point3D.y -= camera.pos.y;
+    //point3D.z -= camera.pos.z;
+
+    Vector3 cameraSpacePoint = multiply(point3D, viewMatrix, &w);
+
+    Vector3 transformedPoint = multiply(cameraSpacePoint, translationMatrix, &w);
+
+    if (w != 0.0f) {
+        transformedPoint.x /= w;
+        transformedPoint.y /= w;
+        transformedPoint.z /= w;
+    }
     return transformedPoint;
 }
 
@@ -125,12 +173,7 @@ Vector3 createNormal(Triangle triangle) {
     normal.y = edge1.z * edge2.x - edge1.x * edge2.z;
     normal.z = edge1.x * edge2.y - edge1.y * edge2.x;
 
-    float length = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-    if (length != 0.0f) {
-        normal.x /= length;
-        normal.y /= length;
-        normal.z /= length;
-    }
+    normal = normalize(normal);
 
     return normal;
 }
@@ -141,6 +184,49 @@ float dotProduct(Triangle triangle, Vector3 vector) {
     float dotProduct = normal.x * vector.x + normal.y * vector.y + normal.z * vector.z;
 
     return dotProduct;
+}
+
+Matrix4x4 worldTransform(Vector3 pos, Vector3 target, Vector3 up) {
+    Vector3 newForward = (Vector3){target.x - pos.x, target.y - pos.y, target.z - pos.z};
+    newForward = normalize(newForward);
+
+    float dot = newForward.x * up.x + newForward.y * up.y + newForward.z * up.z;
+    Vector3 a = (Vector3){dot * newForward.x, dot * newForward.y, dot * newForward.z};
+    Vector3 newUp = (Vector3){up.x - a.x, up.y - a.y, up.z - a.z};
+    newUp = normalize(newUp);
+
+    Vector3 newRight = (Vector3){newUp.y * newForward.z - newUp.z * newForward.y, newUp.z * newForward.x - newUp.x * newForward.z, newUp.x * newForward.y - newUp.y * newForward.x};
+    newRight = normalize(newRight);
+
+    Matrix4x4 matrix = {0};
+    matrix.m[0][0] = newRight.x;
+    matrix.m[0][1] = newRight.y;
+    matrix.m[0][2] = newRight.z;
+    matrix.m[1][0] = newUp.x;
+    matrix.m[1][1] = newUp.y;
+    matrix.m[1][2] = newUp.z;
+    matrix.m[2][0] = newForward.x;
+    matrix.m[2][1] = newForward.y;
+    matrix.m[2][2] = newForward.z;
+    matrix.m[3][0] = pos.x;
+    matrix.m[3][1] = pos.y;
+    matrix.m[3][2] = pos.z;
+    matrix.m[3][3] = 1.0f;
+
+    return matrix;
+}
+
+Matrix4x4 lookAt(Matrix4x4 m) // Only for Rotation/Translation Matrices
+{
+	Matrix4x4 matrix;
+	matrix.m[0][0] = m.m[0][0]; matrix.m[0][1] = m.m[1][0]; matrix.m[0][2] = m.m[2][0]; matrix.m[0][3] = 0.0f;
+	matrix.m[1][0] = m.m[0][1]; matrix.m[1][1] = m.m[1][1]; matrix.m[1][2] = m.m[2][1]; matrix.m[1][3] = 0.0f;
+	matrix.m[2][0] = m.m[0][2]; matrix.m[2][1] = m.m[1][2]; matrix.m[2][2] = m.m[2][2]; matrix.m[2][3] = 0.0f;
+	matrix.m[3][0] = -(m.m[3][0] * matrix.m[0][0] + m.m[3][1] * matrix.m[1][0] + m.m[3][2] * matrix.m[2][0]);
+	matrix.m[3][1] = -(m.m[3][0] * matrix.m[0][1] + m.m[3][1] * matrix.m[1][1] + m.m[3][2] * matrix.m[2][1]);
+	matrix.m[3][2] = -(m.m[3][0] * matrix.m[0][2] + m.m[3][1] * matrix.m[1][2] + m.m[3][2] * matrix.m[2][2]);
+	matrix.m[3][3] = 1.0f;
+	return matrix;
 }
 
 bool isTriangleVisible(Triangle triangle, Cam camera) {
@@ -344,7 +430,7 @@ Figure createCube(Vector3 start, Vector3 size){
 }
 
 
-void printFigure(Figure *figure, Matrix4x4 translationMatrix, Cam camera, LightPlane lightPlane) {
+void printFigure(Figure *figure, Matrix4x4 translationMatrix, Cam camera, LightPlane lightPlane, Matrix4x4 viewMatrix) {
 
     Triangle *trianglesToDraw = NULL;
     int triangleCount = 0;
@@ -359,9 +445,9 @@ void printFigure(Figure *figure, Matrix4x4 translationMatrix, Cam camera, LightP
             free(trianglesToDraw);
             return;
         }
-        Vector3 p0 = projectPoint(face.points[0], translationMatrix);
-        Vector3 p1 = projectPoint(face.points[1], translationMatrix);
-        Vector3 p2 = projectPoint(face.points[2], translationMatrix);
+        Vector3 p0 = projectPoint(face.points[0], translationMatrix, camera, viewMatrix);
+        Vector3 p1 = projectPoint(face.points[1], translationMatrix, camera, viewMatrix);
+        Vector3 p2 = projectPoint(face.points[2], translationMatrix, camera, viewMatrix);
         float lightDot = dotProduct(face, lightPlane.dir);
         Color color = (Color){255 * lightDot, 255 * lightDot, 255 * lightDot, 255};
         Triangle face2D = {p0, p1, p2, color};
@@ -385,10 +471,10 @@ void printFigure(Figure *figure, Matrix4x4 translationMatrix, Cam camera, LightP
     free(trianglesToDraw);
 }
 
-void rotateFigure(Figure *figure, Vector3 rotationCenter, double angleX, double angleY, double angleZ) {
-    double radX = angleX * 3.14159265358979323846 / 180.0;
-    double radY = angleY * 3.14159265358979323846 / 180.0;
-    double radZ = angleZ * 3.14159265358979323846 / 180.0;
+void rotateFigure(Figure *figure, Vector3 rotationCenter, Vector3 angles) {
+    double radX = angles.x * 3.14159265358979323846 / 180.0;
+    double radY = angles.y * 3.14159265358979323846 / 180.0;
+    double radZ = angles.z * 3.14159265358979323846 / 180.0;
 
     for (int i = 0; i < figure->numFaces; i++) {
         for (int j = 0; j < 3; j++) {
@@ -467,7 +553,7 @@ Figure mergeFigures(int numFigures, ...) {
     return mergedFigure;
 }
 
-//gcc main.c -o game.exe -I C:\msys64\mingw64\include -L C:\msys64\mingw64\lib -lraylib -lopengl32 -lgdi32 -lwinmm
+
 int main(void) {
     InitWindow(screenWidth, screenHeight, "");
 
@@ -476,7 +562,7 @@ int main(void) {
     LightPlane lightPlane = createLightPlane((Vector3){0, 0, -1});
     Cam camera;
     camera.pos = (Vector3){0, 0, 0};
-    camera.dir = (Vector2){0, 0};
+    camera.dir = (Vector3){0, 0, 1};
     camera.focalLength = 0.1;
     camera.aspectRatio = (float)screenHeight / (float)screenWidth;
     camera.maxViewDistance = 1000.0f;
@@ -489,49 +575,65 @@ int main(void) {
         {0, 0, camera.maxViewDistance/(camera.maxViewDistance-camera.focalLength), 1},
         {0, 0, -camera.maxViewDistance*camera.focalLength/(camera.maxViewDistance-camera.focalLength), 0}
     });
+    
 
-    //Figure s1 = createSphere((Vector3){1.5, 0, 3}, 1, 20);
 
-    //Figure c1 = createCube((Vector3){-0.5, -0.5, -0.5}, (Vector3){1, 1, 1});
-    //moveFigure(&c1, (Vector3){0, 0, 3});
+    //loading models
+    Figure axis = loadFromFile("axis.obj");
     Figure teapot = loadFromFile("UtahTeapot.obj");
     moveFigure(&teapot, (Vector3){0, 0-2, 8});
-    rotateFigure(&teapot, (Vector3){0, -2, 8}, -90, 0, 0);
+    moveFigure(&axis, (Vector3){0, 0-2, 4});
+    rotateFigure(&teapot, (Vector3){0, -2, 8}, (Vector3){-90, 0, 0});
     Figure scene;
-    /*
-    Cam camera;
 
-    camera.pos = (Vector3){0, 0, 0};
-    camera.dir = (Vector2){0, 0};
+
     float playerSpeed = 5.0f;
-    float rotationSpeed = 5.0f;
-    */
-    // Главный цикл
+    float rotationSpeed = 90.0f;
     while (!WindowShouldClose()) {
+
+        float deltaTime = GetFrameTime();
         /*
-        if (IsKeyDown(KEY_RIGHT))      camera.pos.x += playerSpeed;
-        if (IsKeyDown(KEY_LEFT))       camera.pos.x -= playerSpeed;
-        if (IsKeyDown(KEY_UP))         camera.pos.z += playerSpeed;
-        if (IsKeyDown(KEY_DOWN))       camera.pos.z -= playerSpeed;
-        if (IsKeyDown(KEY_SPACE))      camera.pos.y += playerSpeed;
-        if (IsKeyDown(KEY_LEFT_SHIFT)) camera.pos.y -= playerSpeed;
-        if (IsKeyDown(KEY_W)) camera.dir.y += rotationSpeed;
-        if (IsKeyDown(KEY_S)) camera.dir.y -= rotationSpeed;
-        if (IsKeyDown(KEY_A)) camera.dir.x += rotationSpeed;
-        if (IsKeyDown(KEY_D)) camera.dir.x -= rotationSpeed;
+        target frame = 1/60s
+        real frame = deltaTime s
+        speed per frame = speed / target fps
+        if real frame = 1/120 => speed per real frame = speed per frame / 2 =>
+        => speed per real frame = speed per frame * (target fps / fps)
+        fps = 1 / deltaTime
+        speed per real frame = speed per frame * (target fps * deltaTime)
+        speed per real frame = speed * deltaTime
+        delta - coefficient 
         */
+        Vector3 move = {0, 0, 0};
+        Vector2 rotate = {0, 0};
+        if (IsKeyDown(KEY_RIGHT))      move.z += playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_LEFT))       move.z -= playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_UP))         move.x += playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_DOWN))       move.x -= playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_SPACE))      move.y += playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_LEFT_SHIFT)) move.y -= playerSpeed * deltaTime;
+        if (IsKeyDown(KEY_W)) rotate.x -= rotationSpeed * deltaTime;
+        if (IsKeyDown(KEY_S)) rotate.x += rotationSpeed * deltaTime;
+        if (IsKeyDown(KEY_A)) rotate.y -= rotationSpeed * deltaTime;
+        if (IsKeyDown(KEY_D)) rotate.y += rotationSpeed * deltaTime;
+        moveCamera(&camera, move);
+        rotateCamera(&camera, rotate);
+
         //rotateFigure(&c1, (Vector3){-0.3, 0.2, 3}, 0.7, 1, 1);
         //rotateFigure(&s1, (Vector3){0, 0, 3}, 0, -1, 0);
-        rotateFigure(&teapot, (Vector3){0, 0, 8}, 0, 1, 0);
-        scene = mergeFigures(1, teapot);
+        rotateFigure(&teapot, (Vector3){0, 0, 8}, (Vector3){0, 100*deltaTime, 0});
+        scene = mergeFigures(2, teapot, axis);
+
+
+        Vector3 target = {camera.pos.x + camera.dir.x, camera.pos.y + camera.dir.y, camera.pos.z + camera.dir.z};
+        Matrix4x4 cameraMatrix = worldTransform(camera.pos, target, (Vector3){0, 1, 0});
+        Matrix4x4 viewMatrix = lookAt(cameraMatrix);
+
 
         //Vector2 mousePos = GetMousePosition();
-
         BeginDrawing();
 
             ClearBackground(BLACK);
-            printFigure(&scene, translationMatrix, camera, lightPlane);
-
+            printFigure(&scene, translationMatrix, camera, lightPlane, viewMatrix);
 
 
             //DrawText("Controls: Arrow keys to move", 10, 10, 20, DARKGRAY);
@@ -543,6 +645,7 @@ int main(void) {
     //freeFigure(&c1);
     //freeFigure(&s1);
     freeFigure(&teapot);
+    freeFigure(&axis);
     freeFigure(&scene);
     CloseWindow();
     return 0;
